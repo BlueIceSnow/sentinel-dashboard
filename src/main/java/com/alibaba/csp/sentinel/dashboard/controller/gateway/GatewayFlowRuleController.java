@@ -18,7 +18,6 @@ package com.alibaba.csp.sentinel.dashboard.controller.gateway;
 
 import com.alibaba.csp.sentinel.dashboard.auth.AuthAction;
 import com.alibaba.csp.sentinel.dashboard.auth.AuthService;
-import com.alibaba.csp.sentinel.dashboard.client.SentinelApiClient;
 import com.alibaba.csp.sentinel.dashboard.datasource.entity.gateway.GatewayFlowRuleEntity;
 import com.alibaba.csp.sentinel.dashboard.datasource.entity.gateway.GatewayParamFlowItemEntity;
 import com.alibaba.csp.sentinel.dashboard.discovery.MachineInfo;
@@ -27,19 +26,40 @@ import com.alibaba.csp.sentinel.dashboard.domain.vo.gateway.rule.AddFlowRuleReqV
 import com.alibaba.csp.sentinel.dashboard.domain.vo.gateway.rule.GatewayParamFlowItemVo;
 import com.alibaba.csp.sentinel.dashboard.domain.vo.gateway.rule.UpdateFlowRuleReqVo;
 import com.alibaba.csp.sentinel.dashboard.repository.gateway.InMemGatewayFlowRuleStore;
+import com.alibaba.csp.sentinel.dashboard.rule.DynamicRuleProvider;
+import com.alibaba.csp.sentinel.dashboard.rule.DynamicRulePublisher;
 import com.alibaba.csp.sentinel.util.StringUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 
-import static com.alibaba.csp.sentinel.slots.block.RuleConstant.*;
-import static com.alibaba.csp.sentinel.adapter.gateway.common.SentinelGatewayConstants.*;
-import static com.alibaba.csp.sentinel.dashboard.datasource.entity.gateway.GatewayFlowRuleEntity.*;
+import static com.alibaba.csp.sentinel.adapter.gateway.common.SentinelGatewayConstants.PARAM_MATCH_STRATEGY_CONTAINS;
+import static com.alibaba.csp.sentinel.adapter.gateway.common.SentinelGatewayConstants.PARAM_MATCH_STRATEGY_EXACT;
+import static com.alibaba.csp.sentinel.adapter.gateway.common.SentinelGatewayConstants.PARAM_MATCH_STRATEGY_REGEX;
+import static com.alibaba.csp.sentinel.adapter.gateway.common.SentinelGatewayConstants.PARAM_PARSE_STRATEGY_CLIENT_IP;
+import static com.alibaba.csp.sentinel.adapter.gateway.common.SentinelGatewayConstants.PARAM_PARSE_STRATEGY_COOKIE;
+import static com.alibaba.csp.sentinel.adapter.gateway.common.SentinelGatewayConstants.PARAM_PARSE_STRATEGY_HEADER;
+import static com.alibaba.csp.sentinel.adapter.gateway.common.SentinelGatewayConstants.PARAM_PARSE_STRATEGY_HOST;
+import static com.alibaba.csp.sentinel.adapter.gateway.common.SentinelGatewayConstants.PARAM_PARSE_STRATEGY_URL_PARAM;
+import static com.alibaba.csp.sentinel.adapter.gateway.common.SentinelGatewayConstants.RESOURCE_MODE_CUSTOM_API_NAME;
+import static com.alibaba.csp.sentinel.adapter.gateway.common.SentinelGatewayConstants.RESOURCE_MODE_ROUTE_ID;
+import static com.alibaba.csp.sentinel.dashboard.datasource.entity.gateway.GatewayFlowRuleEntity.INTERVAL_UNIT_DAY;
+import static com.alibaba.csp.sentinel.dashboard.datasource.entity.gateway.GatewayFlowRuleEntity.INTERVAL_UNIT_HOUR;
+import static com.alibaba.csp.sentinel.dashboard.datasource.entity.gateway.GatewayFlowRuleEntity.INTERVAL_UNIT_MINUTE;
+import static com.alibaba.csp.sentinel.dashboard.datasource.entity.gateway.GatewayFlowRuleEntity.INTERVAL_UNIT_SECOND;
+import static com.alibaba.csp.sentinel.slots.block.RuleConstant.CONTROL_BEHAVIOR_DEFAULT;
+import static com.alibaba.csp.sentinel.slots.block.RuleConstant.CONTROL_BEHAVIOR_RATE_LIMITER;
+import static com.alibaba.csp.sentinel.slots.block.RuleConstant.FLOW_GRADE_QPS;
+import static com.alibaba.csp.sentinel.slots.block.RuleConstant.FLOW_GRADE_THREAD;
 
 /**
  * Gateway flow rule Controller for manage gateway flow rules.
@@ -57,7 +77,9 @@ public class GatewayFlowRuleController {
     private InMemGatewayFlowRuleStore repository;
 
     @Autowired
-    private SentinelApiClient sentinelApiClient;
+    private DynamicRulePublisher<List<GatewayFlowRuleEntity>> publisher;
+    @Autowired
+    private DynamicRuleProvider<List<GatewayFlowRuleEntity>> provider;
 
     @GetMapping("/list.json")
     @AuthAction(AuthService.PrivilegeType.READ_RULE)
@@ -74,7 +96,7 @@ public class GatewayFlowRuleController {
         }
 
         try {
-            List<GatewayFlowRuleEntity> rules = sentinelApiClient.fetchGatewayFlowRules(app, ip, port).get();
+            List<GatewayFlowRuleEntity> rules = provider.getRules(app);
             repository.saveAll(rules);
             return Result.ofSuccess(rules);
         } catch (Throwable throwable) {
@@ -85,7 +107,8 @@ public class GatewayFlowRuleController {
 
     @PostMapping("/new.json")
     @AuthAction(AuthService.PrivilegeType.WRITE_RULE)
-    public Result<GatewayFlowRuleEntity> addFlowRule(@RequestBody AddFlowRuleReqVo reqVo) {
+    public Result<GatewayFlowRuleEntity> addFlowRule(@RequestBody AddFlowRuleReqVo reqVo)
+            throws Exception {
 
         String app = reqVo.getApp();
         if (StringUtil.isBlank(app)) {
@@ -112,7 +135,8 @@ public class GatewayFlowRuleController {
         if (resourceMode == null) {
             return Result.ofFail(-1, "resourceMode can't be null");
         }
-        if (!Arrays.asList(RESOURCE_MODE_ROUTE_ID, RESOURCE_MODE_CUSTOM_API_NAME).contains(resourceMode)) {
+        if (!Arrays.asList(RESOURCE_MODE_ROUTE_ID, RESOURCE_MODE_CUSTOM_API_NAME)
+                .contains(resourceMode)) {
             return Result.ofFail(-1, "invalid resourceMode: " + resourceMode);
         }
         entity.setResourceMode(resourceMode);
@@ -132,14 +156,17 @@ public class GatewayFlowRuleController {
 
             // 参数属性 0-ClientIP 1-Remote Host 2-Header 3-URL参数 4-Cookie
             Integer parseStrategy = paramItem.getParseStrategy();
-            if (!Arrays.asList(PARAM_PARSE_STRATEGY_CLIENT_IP, PARAM_PARSE_STRATEGY_HOST, PARAM_PARSE_STRATEGY_HEADER
-                    , PARAM_PARSE_STRATEGY_URL_PARAM, PARAM_PARSE_STRATEGY_COOKIE).contains(parseStrategy)) {
+            if (!Arrays.asList(PARAM_PARSE_STRATEGY_CLIENT_IP, PARAM_PARSE_STRATEGY_HOST,
+                    PARAM_PARSE_STRATEGY_HEADER
+                    , PARAM_PARSE_STRATEGY_URL_PARAM, PARAM_PARSE_STRATEGY_COOKIE)
+                    .contains(parseStrategy)) {
                 return Result.ofFail(-1, "invalid parseStrategy: " + parseStrategy);
             }
             itemEntity.setParseStrategy(paramItem.getParseStrategy());
 
             // 当参数属性为2-Header 3-URL参数 4-Cookie时，参数名称必填
-            if (Arrays.asList(PARAM_PARSE_STRATEGY_HEADER, PARAM_PARSE_STRATEGY_URL_PARAM, PARAM_PARSE_STRATEGY_COOKIE).contains(parseStrategy)) {
+            if (Arrays.asList(PARAM_PARSE_STRATEGY_HEADER, PARAM_PARSE_STRATEGY_URL_PARAM,
+                    PARAM_PARSE_STRATEGY_COOKIE).contains(parseStrategy)) {
                 // 参数名称
                 String fieldName = paramItem.getFieldName();
                 if (StringUtil.isBlank(fieldName)) {
@@ -153,7 +180,8 @@ public class GatewayFlowRuleController {
             if (StringUtil.isNotEmpty(pattern)) {
                 itemEntity.setPattern(pattern);
                 Integer matchStrategy = paramItem.getMatchStrategy();
-                if (!Arrays.asList(PARAM_MATCH_STRATEGY_EXACT, PARAM_MATCH_STRATEGY_CONTAINS, PARAM_MATCH_STRATEGY_REGEX).contains(matchStrategy)) {
+                if (!Arrays.asList(PARAM_MATCH_STRATEGY_EXACT, PARAM_MATCH_STRATEGY_CONTAINS,
+                        PARAM_MATCH_STRATEGY_REGEX).contains(matchStrategy)) {
                     return Result.ofFail(-1, "invalid matchStrategy: " + matchStrategy);
                 }
                 itemEntity.setMatchStrategy(matchStrategy);
@@ -195,7 +223,8 @@ public class GatewayFlowRuleController {
         if (intervalUnit == null) {
             return Result.ofFail(-1, "intervalUnit can't be null");
         }
-        if (!Arrays.asList(INTERVAL_UNIT_SECOND, INTERVAL_UNIT_MINUTE, INTERVAL_UNIT_HOUR, INTERVAL_UNIT_DAY).contains(intervalUnit)) {
+        if (!Arrays.asList(INTERVAL_UNIT_SECOND, INTERVAL_UNIT_MINUTE, INTERVAL_UNIT_HOUR,
+                INTERVAL_UNIT_DAY).contains(intervalUnit)) {
             return Result.ofFail(-1, "Invalid intervalUnit: " + intervalUnit);
         }
         entity.setIntervalUnit(intervalUnit);
@@ -205,7 +234,8 @@ public class GatewayFlowRuleController {
         if (controlBehavior == null) {
             return Result.ofFail(-1, "controlBehavior can't be null");
         }
-        if (!Arrays.asList(CONTROL_BEHAVIOR_DEFAULT, CONTROL_BEHAVIOR_RATE_LIMITER).contains(controlBehavior)) {
+        if (!Arrays.asList(CONTROL_BEHAVIOR_DEFAULT, CONTROL_BEHAVIOR_RATE_LIMITER)
+                .contains(controlBehavior)) {
             return Result.ofFail(-1, "invalid controlBehavior: " + controlBehavior);
         }
         entity.setControlBehavior(controlBehavior);
@@ -243,16 +273,15 @@ public class GatewayFlowRuleController {
             return Result.ofThrowable(-1, throwable);
         }
 
-        if (!publishRules(app, ip, port)) {
-            logger.warn("publish gateway flow rules fail after add");
-        }
+        publishRules(app);
 
         return Result.ofSuccess(entity);
     }
 
     @PostMapping("/save.json")
     @AuthAction(AuthService.PrivilegeType.WRITE_RULE)
-    public Result<GatewayFlowRuleEntity> updateFlowRule(@RequestBody UpdateFlowRuleReqVo reqVo) {
+    public Result<GatewayFlowRuleEntity> updateFlowRule(@RequestBody UpdateFlowRuleReqVo reqVo)
+            throws Exception {
 
         String app = reqVo.getApp();
         if (StringUtil.isBlank(app)) {
@@ -277,14 +306,17 @@ public class GatewayFlowRuleController {
 
             // 参数属性 0-ClientIP 1-Remote Host 2-Header 3-URL参数 4-Cookie
             Integer parseStrategy = paramItem.getParseStrategy();
-            if (!Arrays.asList(PARAM_PARSE_STRATEGY_CLIENT_IP, PARAM_PARSE_STRATEGY_HOST, PARAM_PARSE_STRATEGY_HEADER
-                    , PARAM_PARSE_STRATEGY_URL_PARAM, PARAM_PARSE_STRATEGY_COOKIE).contains(parseStrategy)) {
+            if (!Arrays.asList(PARAM_PARSE_STRATEGY_CLIENT_IP, PARAM_PARSE_STRATEGY_HOST,
+                    PARAM_PARSE_STRATEGY_HEADER
+                    , PARAM_PARSE_STRATEGY_URL_PARAM, PARAM_PARSE_STRATEGY_COOKIE)
+                    .contains(parseStrategy)) {
                 return Result.ofFail(-1, "invalid parseStrategy: " + parseStrategy);
             }
             itemEntity.setParseStrategy(paramItem.getParseStrategy());
 
             // 当参数属性为2-Header 3-URL参数 4-Cookie时，参数名称必填
-            if (Arrays.asList(PARAM_PARSE_STRATEGY_HEADER, PARAM_PARSE_STRATEGY_URL_PARAM, PARAM_PARSE_STRATEGY_COOKIE).contains(parseStrategy)) {
+            if (Arrays.asList(PARAM_PARSE_STRATEGY_HEADER, PARAM_PARSE_STRATEGY_URL_PARAM,
+                    PARAM_PARSE_STRATEGY_COOKIE).contains(parseStrategy)) {
                 // 参数名称
                 String fieldName = paramItem.getFieldName();
                 if (StringUtil.isBlank(fieldName)) {
@@ -298,7 +330,8 @@ public class GatewayFlowRuleController {
             if (StringUtil.isNotEmpty(pattern)) {
                 itemEntity.setPattern(pattern);
                 Integer matchStrategy = paramItem.getMatchStrategy();
-                if (!Arrays.asList(PARAM_MATCH_STRATEGY_EXACT, PARAM_MATCH_STRATEGY_CONTAINS, PARAM_MATCH_STRATEGY_REGEX).contains(matchStrategy)) {
+                if (!Arrays.asList(PARAM_MATCH_STRATEGY_EXACT, PARAM_MATCH_STRATEGY_CONTAINS,
+                        PARAM_MATCH_STRATEGY_REGEX).contains(matchStrategy)) {
                     return Result.ofFail(-1, "invalid matchStrategy: " + matchStrategy);
                 }
                 itemEntity.setMatchStrategy(matchStrategy);
@@ -342,7 +375,8 @@ public class GatewayFlowRuleController {
         if (intervalUnit == null) {
             return Result.ofFail(-1, "intervalUnit can't be null");
         }
-        if (!Arrays.asList(INTERVAL_UNIT_SECOND, INTERVAL_UNIT_MINUTE, INTERVAL_UNIT_HOUR, INTERVAL_UNIT_DAY).contains(intervalUnit)) {
+        if (!Arrays.asList(INTERVAL_UNIT_SECOND, INTERVAL_UNIT_MINUTE, INTERVAL_UNIT_HOUR,
+                INTERVAL_UNIT_DAY).contains(intervalUnit)) {
             return Result.ofFail(-1, "Invalid intervalUnit: " + intervalUnit);
         }
         entity.setIntervalUnit(intervalUnit);
@@ -352,7 +386,8 @@ public class GatewayFlowRuleController {
         if (controlBehavior == null) {
             return Result.ofFail(-1, "controlBehavior can't be null");
         }
-        if (!Arrays.asList(CONTROL_BEHAVIOR_DEFAULT, CONTROL_BEHAVIOR_RATE_LIMITER).contains(controlBehavior)) {
+        if (!Arrays.asList(CONTROL_BEHAVIOR_DEFAULT, CONTROL_BEHAVIOR_RATE_LIMITER)
+                .contains(controlBehavior)) {
             return Result.ofFail(-1, "invalid controlBehavior: " + controlBehavior);
         }
         entity.setControlBehavior(controlBehavior);
@@ -389,9 +424,7 @@ public class GatewayFlowRuleController {
             return Result.ofThrowable(-1, throwable);
         }
 
-        if (!publishRules(app, entity.getIp(), entity.getPort())) {
-            logger.warn("publish gateway flow rules fail after update");
-        }
+        publishRules(app);
 
         return Result.ofSuccess(entity);
     }
@@ -399,7 +432,7 @@ public class GatewayFlowRuleController {
 
     @PostMapping("/delete.json")
     @AuthAction(AuthService.PrivilegeType.DELETE_RULE)
-    public Result<Long> deleteFlowRule(Long id) {
+    public Result<Long> deleteFlowRule(Long id) throws Exception {
 
         if (id == null) {
             return Result.ofFail(-1, "id can't be null");
@@ -416,16 +449,13 @@ public class GatewayFlowRuleController {
             logger.error("delete gateway flow rule error:", throwable);
             return Result.ofThrowable(-1, throwable);
         }
-
-        if (!publishRules(oldEntity.getApp(), oldEntity.getIp(), oldEntity.getPort())) {
-            logger.warn("publish gateway flow rules fail after delete");
-        }
-
+        publishRules(oldEntity.getApp());
         return Result.ofSuccess(id);
     }
 
-    private boolean publishRules(String app, String ip, Integer port) {
-        List<GatewayFlowRuleEntity> rules = repository.findAllByMachine(MachineInfo.of(app, ip, port));
-        return sentinelApiClient.modifyGatewayFlowRules(app, ip, port, rules);
+    private void publishRules(String app) throws Exception {
+        List<GatewayFlowRuleEntity> rules =
+                repository.findAllByApp(app);
+        publisher.publish(app , rules);
     }
 }

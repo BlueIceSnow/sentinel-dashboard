@@ -15,16 +15,15 @@
  */
 package com.alibaba.csp.sentinel.dashboard.config.persistence;
 
-import com.alibaba.csp.sentinel.dashboard.datasource.entity.rule.FlowRuleEntity;
-import com.alibaba.csp.sentinel.datasource.Converter;
-import com.alibaba.fastjson.JSON;
 import com.alibaba.nacos.api.PropertyKeyConst;
 import com.alibaba.nacos.api.config.ConfigFactory;
 import com.alibaba.nacos.api.config.ConfigService;
+import lombok.Data;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-import java.util.List;
+import javax.annotation.Resource;
 import java.util.Properties;
 
 /**
@@ -32,29 +31,20 @@ import java.util.Properties;
  * @since 1.4.0
  */
 @Configuration
+@Data
+@EnableConfigurationProperties(value = {NacosConfigProperties.class})
 public class NacosConfig {
 
-    @Bean
-    public Converter<List<FlowRuleEntity>, String> flowRuleEntityEncoder() {
-        return JSON::toJSONString;
-    }
-
-    @Bean
-    public Converter<String, List<FlowRuleEntity>> flowRuleEntityDecoder() {
-        return s -> JSON.parseArray(s, FlowRuleEntity.class);
-    }
+    @Resource
+    private NacosConfigProperties nacosConfigProperties;
 
     @Bean
     public ConfigService nacosConfigService() throws Exception {
-        final String remoteAddress = "127.0.0.1:8848";
-        final String namespace = "def2c741-902f-4be8-b173-835204b0f6fd";
-        final String groupId = "dev";
-        final String dataId = "flow-limit";
         final Properties properties = new Properties();
-        properties.put(PropertyKeyConst.SERVER_ADDR, remoteAddress);
-        properties.put(PropertyKeyConst.NAMESPACE, namespace);
-        properties.put(PropertyKeyConst.USERNAME, "nacos");
-        properties.put(PropertyKeyConst.PASSWORD, "nacos");
+        properties.put(PropertyKeyConst.SERVER_ADDR, nacosConfigProperties.getAddress());
+        properties.put(PropertyKeyConst.NAMESPACE, nacosConfigProperties.getNamespace());
+        properties.put(PropertyKeyConst.USERNAME, nacosConfigProperties.getUsername());
+        properties.put(PropertyKeyConst.PASSWORD, nacosConfigProperties.getPassword());
         return ConfigFactory.createConfigService(properties);
     }
 }

@@ -35,6 +35,24 @@ public final class NacosConfigUtil {
      * 参数流控限制
      */
     public static final String PARAM_FLOW_DATA_ID_POSTFIX = "-param-rules";
+
+    /**
+     * 系统规则限制
+     */
+    public static final String SYSTEM_DATA_ID_POSTFIX = "-system-rules";
+
+
+    /**
+     * 授权规则限制
+     */
+    public static final String AUTHORITY_DATA_ID_POSTFIX = "-authority-rules";
+
+    /**
+     * 网关流控限制
+     */
+    public static final String GATEWAY_FLOW_DATA_ID_POSTFIX = "-gateway-flow-rules";
+
+
     /**
      * 集群数据
      */
